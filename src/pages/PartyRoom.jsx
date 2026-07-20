@@ -565,9 +565,24 @@ function PartyRoom() {
     setIsSearching(true);
     try {
       const res = await fetch(`${API_BASE_URL}/music/search?q=${encodeURIComponent(searchQuery)}`);
-      const data = await res.json();
-      if (res.ok) setSearchResults(data);
-    } catch (err) { console.error(err); }
+      let data = null;
+      try { data = await res.json(); } catch { /* non-JSON body */ }
+
+      if (res.ok && Array.isArray(data)) {
+        setSearchResults(data);
+        if (data.length === 0) showToast('No results found. Try a different search.', 'info');
+      } else {
+        const msg =
+          (data && (data.detail || data.message || data.error)) ||
+          (res.status === 429
+            ? 'Too many searches — please wait a minute and try again.'
+            : 'Search failed. Please try again.');
+        showToast(msg, 'error');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Network error while searching. Check your connection.', 'error');
+    }
     finally { setIsSearching(false); }
   };
 
