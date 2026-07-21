@@ -130,8 +130,8 @@ function Main() {
   useEffect(() => {
     if (proSearchStatus?.in_cooldown && userId) {
       const interval = setInterval(() => {
-        fetchProSearchStatus();
-      }, 10000); // Check every 10 seconds
+        if (document.visibilityState === "visible") fetchProSearchStatus();
+      }, 10000); // Check every 10 seconds, only while the tab is visible
 
       return () => clearInterval(interval);
     }
@@ -234,8 +234,18 @@ function Main() {
 
   useEffect(() => {
     fetchProSearchStatus();
-    const interval = setInterval(fetchProSearchStatus, 30000);
-    return () => clearInterval(interval);
+    // Skip the network poll while the tab is hidden; refresh once on return.
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") fetchProSearchStatus();
+    }, 30000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") fetchProSearchStatus();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [fetchProSearchStatus]);
 
   // Countdown timer for Navbar

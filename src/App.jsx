@@ -1,23 +1,34 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, lazy, Suspense } from "react";
 import {
   BrowserRouter as Router,
   Routes,
   Route,
   Navigate,
 } from "react-router-dom";
-import LandingPage from "./pages/LandingPage";
-import Signup from "./pages/Signup";
-import Login from "./pages/Login";
-import Main from "./pages/Main";
-import Profile from "./pages/Profile";
-import About from "./pages/About";
-import PartyRoom from "./pages/PartyRoom";
-import GamesRoom from "./pages/GamesRoom";
-import SpotifyCallback from "./pages/SpotifyCallback";
-import TermsOfService from "./pages/TermsOfService";
-import PrivacyPage from "./pages/PrivacyPage";
-import RefundPolicy from "./pages/RefundPolicy";
 import Snowfall from "./components/Snowfall";
+
+// Route-level code splitting: each page is loaded on demand so the initial
+// bundle only carries the shell, not all 12 pages at once.
+const LandingPage = lazy(() => import("./pages/LandingPage"));
+const Signup = lazy(() => import("./pages/Signup"));
+const Login = lazy(() => import("./pages/Login"));
+const Main = lazy(() => import("./pages/Main"));
+const Profile = lazy(() => import("./pages/Profile"));
+const About = lazy(() => import("./pages/About"));
+const PartyRoom = lazy(() => import("./pages/PartyRoom"));
+const GamesRoom = lazy(() => import("./pages/GamesRoom"));
+const SpotifyCallback = lazy(() => import("./pages/SpotifyCallback"));
+const TermsOfService = lazy(() => import("./pages/TermsOfService"));
+const PrivacyPage = lazy(() => import("./pages/PrivacyPage"));
+const RefundPolicy = lazy(() => import("./pages/RefundPolicy"));
+
+function PageFallback() {
+  return (
+    <div className="min-h-screen bg-[#121212] flex items-center justify-center text-white">
+      <div className="w-8 h-8 rounded-full border-2 border-[#1db954] border-t-transparent animate-spin" />
+    </div>
+  );
+}
 
 function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
@@ -47,6 +58,7 @@ function App() {
           <span>{isSnowing ? "Stop Snow" : "Let it Snow"}</span>
         </button>
 
+        <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/" element={<LandingPage />} />
           <Route path="/signup" element={<Signup />} />
@@ -84,6 +96,7 @@ function App() {
           <Route path="/privacy-policy" element={<PrivacyPage />} />
           <Route path="/refund-policy" element={<RefundPolicy />} />
         </Routes>
+        </Suspense>
       </div>
     </Router>
   );
