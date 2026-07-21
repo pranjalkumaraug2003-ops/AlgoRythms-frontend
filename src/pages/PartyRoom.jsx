@@ -292,7 +292,9 @@ function PartyRoom() {
 
       case 'sync_play': {
         const { videoId, song, current_time, execute_at_ms } = payload;
-        if (currentSongIdRef.current === song.songId) break;
+        // Always (re)load on an explicit play command. Duplicate deliveries are
+        // already filtered by the version (v) dedup in onmessage, so this lets
+        // the host replay or go back to the same track without it being ignored.
         currentSongIdRef.current = song.songId;
         
         const localExecuteAt = ntpSyncedRef.current 
