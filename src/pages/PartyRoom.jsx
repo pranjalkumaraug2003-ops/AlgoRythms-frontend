@@ -79,6 +79,9 @@ function PartyRoom() {
   const ntpDataRef = useRef([]);
   const lastVersions = useRef(new Map());
   const handleWsMessageRef = useRef(null);
+  const pendingSyncStateRef = useRef(null);   // sync_state deferred until NTP synced
+  const playbackAnchorRef = useRef(null);     // { positionSec, serverMs, isPlaying, songId }
+  const driftIntervalRef = useRef(null);
 
   function parseISO8601Duration(duration) {
     if (!duration) return 0;
@@ -223,9 +226,54 @@ function PartyRoom() {
     connect();
   }
 
+  // Applies a server sync_state to the player: computes the true current
+  // position (accounting for network + elapsed time) and seeks/loads.
+  // Also records a playback anchor used for drift correction.
+  function applyServerSync({ currentSong, is_playing, current_time, server_timestamp_ms }) {
+    const nowMs = ntpSyncedRef.current
+      ? (performance.now() + clockOffsetRef.current)
+      : (Date.now() + clockOffsetRef.current);
+    const networkLatencyMs = nowMs - server_timestamp_ms;
+    const adjustedTime = current_time + (networkLatencyMs / 1000);
+
+    playbackAnchorRef.current = {
+      positionSec: current_time,
+      serverMs: server_timestamp_ms,
+      isPlaying: is_playing,
+      songId: currentSong.songId
+    };
+
+    if (playerReadyRef.current && playerRef.current) {
+      if (currentSongIdRef.current !== currentSong.songId) {
+        currentSongIdRef.current = currentSong.songId;
+        playerRef.current.loadVideoById({ videoId: currentSong.youtubeId, startSeconds: adjustedTime });
+        if (!is_playing) playerRef.current.pauseVideo();
+      } else {
+        playerRef.current.seekTo(adjustedTime, true);
+        if (!is_playing) playerRef.current.pauseVideo();
+      }
+    } else {
+      pendingSyncRef.current = {
+        youtubeId: currentSong.youtubeId,
+        seekTo: adjustedTime,
+        autoPlay: is_playing,
+        songId: currentSong.songId
+      };
+    }
+  }
+
+  // Expected playback position (seconds) right now, from the last anchor.
+  function computeExpectedPosition() {
+    const a = playbackAnchorRef.current;
+    if (!a || !a.isPlaying) return null;
+    const nowServerMs = performance.now() + clockOffsetRef.current;
+    const elapsed = Math.max(0, (nowServerMs - a.serverMs) / 1000);
+    return a.positionSec + elapsed;
+  }
+
   function handleWsMessage(type, payload) {
     const p = playerRef.current;
-    
+
     switch (type) {
       case 'ping':
         wsRef.current?.send(JSON.stringify({ event: 'pong', data: {} }));
@@ -246,6 +294,12 @@ function PartyRoom() {
           clockOffsetRef.current = best[1].offset;
           ntpSyncedRef.current = true;
           console.log(`NTP synced. Offset: ${clockOffsetRef.current.toFixed(2)}ms`);
+          // Apply any join-time state that arrived before we had a clock offset
+          if (pendingSyncStateRef.current) {
+            const pending = pendingSyncStateRef.current;
+            pendingSyncStateRef.current = null;
+            applyServerSync(pending);
+          }
         }
         break;
       }
@@ -258,33 +312,17 @@ function PartyRoom() {
         });
 
         if (currentSong) {
-          const nowMs = ntpSyncedRef.current 
-              ? (performance.now() + clockOffsetRef.current) 
-              : (Date.now() + clockOffsetRef.current);
-          
-          const networkLatencyMs = nowMs - server_timestamp_ms;
-          const adjustedTime = current_time + (networkLatencyMs / 1000);
-          
           setCurrentPlayback(currentSong);
           setIsPlaying(is_playing);
           setRoomState(prev => prev ? { ...prev, currentSong, is_playing } : prev);
-          
-          if (playerReadyRef.current && playerRef.current) {
-            if (currentSongIdRef.current !== currentSong.songId) {
-              currentSongIdRef.current = currentSong.songId;
-              playerRef.current.loadVideoById({ videoId: currentSong.youtubeId, startSeconds: adjustedTime });
-              if (!is_playing) playerRef.current.pauseVideo();
-            } else {
-              playerRef.current.seekTo(adjustedTime, true);
-              if (!is_playing) playerRef.current.pauseVideo();
-            }
+
+          const syncData = { currentSong, is_playing, current_time, server_timestamp_ms };
+          if (ntpSyncedRef.current) {
+            applyServerSync(syncData);
           } else {
-            pendingSyncRef.current = {
-              youtubeId: currentSong.youtubeId,
-              seekTo: adjustedTime,
-              autoPlay: is_playing,
-              songId: currentSong.songId
-            };
+            // Defer the seek until NTP finishes — otherwise a skewed device
+            // clock places a late-joiner at the wrong position.
+            pendingSyncStateRef.current = syncData;
           }
         }
         break;
@@ -302,11 +340,18 @@ function PartyRoom() {
             : performance.now() + Math.max(0, execute_at_ms - Date.now());
             
         const delayMs = Math.max(0, localExecuteAt - performance.now());
-        
+
         setCurrentPlayback(song);
         setIsPlaying(true);
         setRoomState(prev => prev ? { ...prev, currentSong: song, is_playing: true } : prev);
-        
+
+        playbackAnchorRef.current = {
+          positionSec: current_time,
+          serverMs: execute_at_ms,
+          isPlaying: true,
+          songId: song.songId
+        };
+
         setTimeout(() => {
           if (playerRef.current && playerReadyRef.current) {
             playerRef.current.loadVideoById({ videoId, startSeconds: current_time });
@@ -341,15 +386,30 @@ function PartyRoom() {
         }
         setIsPlaying(action === 'play');
         setRoomState(prev => prev ? { ...prev, is_playing: action === 'play' } : prev);
+
+        playbackAnchorRef.current = {
+          positionSec: current_time,
+          serverMs: execute_at_ms,
+          isPlaying: action === 'play',
+          songId: currentSongIdRef.current
+        };
         break;
       }
 
       case 'sync_seek': {
         const { current_time, execute_at_ms } = payload;
-        const localExecuteAt = ntpSyncedRef.current 
+        const localExecuteAt = ntpSyncedRef.current
             ? execute_at_ms - clockOffsetRef.current
             : performance.now() + Math.max(0, execute_at_ms - Date.now());
         const delayMs = Math.max(0, localExecuteAt - performance.now());
+
+        playbackAnchorRef.current = {
+          positionSec: current_time,
+          serverMs: execute_at_ms,
+          isPlaying: playbackAnchorRef.current?.isPlaying ?? true,
+          songId: currentSongIdRef.current
+        };
+
         setTimeout(() => {
           if (playerRef.current && playerReadyRef.current) {
             playerRef.current.seekTo(current_time, true);
@@ -387,6 +447,7 @@ function PartyRoom() {
         setCurrentPlayback(null);
         setIsPlaying(false);
         currentSongIdRef.current = null;
+        playbackAnchorRef.current = null;
         setRoomState(prev => prev ? { ...prev, currentSong: null, is_playing: false } : prev);
         if (p?.pauseVideo) p.pauseVideo();
         break;
@@ -528,6 +589,37 @@ function PartyRoom() {
     initYouTubePlayer();
     return () => { if (playerRef.current?.destroy) playerRef.current.destroy(); };
   }, [roomCode]);
+
+  // Guest drift correction: gently re-sync guests whose player has drifted from
+  // the host. Host is the source of truth and is skipped. Only nudges when the
+  // player is actually playing the current song and drift is meaningful but not
+  // absurd (a huge gap usually means a song change is mid-flight).
+  useEffect(() => {
+    const id = setInterval(() => {
+      try {
+        if (userRef.current?.id === hostIdRef.current) return;   // host: skip
+        if (!ntpSyncedRef.current || !playerReadyRef.current || !playerRef.current) return;
+        const anchor = playbackAnchorRef.current;
+        if (!anchor || !anchor.isPlaying) return;
+        if (anchor.songId !== currentSongIdRef.current) return;
+
+        const player = playerRef.current;
+        if (player.getPlayerState && player.getPlayerState() !== 1) return;  // 1 = PLAYING
+
+        const expected = computeExpectedPosition();
+        if (expected == null || typeof player.getCurrentTime !== 'function') return;
+        const actual = player.getCurrentTime();
+        if (typeof actual !== 'number') return;
+
+        const drift = Math.abs(actual - expected);
+        if (drift > 1.5 && drift < 30) {
+          player.seekTo(expected, true);
+        }
+      } catch { /* player not ready / transient */ }
+    }, 15000);
+    driftIntervalRef.current = id;
+    return () => clearInterval(id);
+  }, []);
 
   const handlePlayPause = () => {
     if (!currentUser || currentUser.id !== roomState?.host_id) {
